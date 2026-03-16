@@ -1,6 +1,6 @@
 [project]
 name = "ai-transition-mixer"
-version = "0.1.0"
+version = "0.1.1"
 description = "AI Transition Mixer — split side-by-side Resolume decks and crossfade through AI"
 requires-python = ">=3.10"
 dependencies = [

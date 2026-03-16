@@ -75,7 +75,7 @@ def generate_transition_prompts(
     crossfader: float,
     transition_style: str = "smooth morphing",
     num_prompts: int = 6,
-    model: str = "qwen3.5-9b",
+    model: str = "qwen/qwen3.5-9b",
     lmstudio_url: str = "http://localhost:1234",
 ) -> list[str]:
     """
@@ -120,6 +120,26 @@ def generate_transition_prompts(
         "max_tokens": 2000,
         "temperature": 0.5,
         "stream": False,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "transition_prompts",
+                "strict": True,
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "prompts": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": num_prompts,
+                            "maxItems": num_prompts,
+                        }
+                    },
+                    "required": ["prompts"],
+                    "additionalProperties": False,
+                },
+            },
+        },
     }
 
     req = urllib.request.Request(
@@ -129,12 +149,13 @@ def generate_transition_prompts(
         method="POST",
     )
 
+    content = ""
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             content = data["choices"][0]["message"]["content"].strip()
 
-            # Strip <think> tags
+            # Strip <think> tags (shouldn't appear with /no_think but just in case)
             if "<think>" in content:
                 content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
 
@@ -148,6 +169,7 @@ def generate_transition_prompts(
             prompts = parsed.get("prompts", [])
 
             if isinstance(prompts, list) and len(prompts) >= 2:
+                logger.info(f"[Prompter] Generated {len(prompts)} prompts successfully")
                 return prompts[:num_prompts]
             else:
                 logger.warning(f"[Prompter] Got {len(prompts)} prompts, expected {num_prompts}")
@@ -246,7 +268,7 @@ class TransitionPrompter:
         self,
         scope_url: str = "http://localhost:8000",
         lmstudio_url: str = "http://localhost:1234",
-        model: str = "qwen3.5-9b",
+        model: str = "qwen/qwen3.5-9b",
         interval: float = 2.0,
         transition_style: str = "smooth morphing",
     ):
@@ -355,7 +377,7 @@ def main():
     parser = argparse.ArgumentParser(description="Transition Prompter for AI Transition Mixer")
     parser.add_argument("--scope-url", default="http://localhost:8000", help="Scope API URL")
     parser.add_argument("--lmstudio-url", default="http://localhost:1234", help="LM Studio API URL")
-    parser.add_argument("--model", default="qwen3.5-9b", help="LM Studio model name")
+    parser.add_argument("--model", default="qwen/qwen3.5-9b", help="LM Studio model name")
     parser.add_argument("--interval", type=float, default=2.0, help="Seconds between LLM calls")
     parser.add_argument("--style", default="smooth morphing", help="Transition style description")
     parser.add_argument("--prompt-a", required=True, help="Description of Deck A content")
