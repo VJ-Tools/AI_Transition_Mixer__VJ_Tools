@@ -52,11 +52,10 @@ try:
     from pydantic import Field
     from scope.core.pipelines.base_schema import (
         BasePipelineConfig,
-        UsageType,
         ModeDefaults,
         ui_field_config,
     )
-    from scope.core.pipelines.interface import Pipeline, Requirements
+    from scope.core.pipelines.interface import Pipeline
     _HAS_SCOPE = True
 except ImportError:
     _HAS_SCOPE = False
@@ -65,24 +64,30 @@ except ImportError:
         """Stub for testing outside Scope."""
         pass
 
-    class Requirements:
-        def __init__(self, **kw):
-            self.__dict__.update(kw)
-
 
 # ─── Config ─────────────────────────────────────────────────────────────────
 
 if _HAS_SCOPE:
 
     class AiTransitionMixerConfig(BasePipelineConfig):
-        pipeline_id: str = "ai_transition_mixer__vj_tools"
-        name: str = "AI Transition Mixer"
-        description: str = "Split side-by-side Resolume decks and crossfade through AI via VACE"
-        usage_type: UsageType = UsageType.PREPROCESSOR
-        mode_defaults: ModeDefaults = ModeDefaults(
-            text={"enabled": True},
-            video={"enabled": True},
-        )
+        # ClassVar metadata — matches Scope's pipeline convention
+        pipeline_id = "ai_transition_mixer__vj_tools"
+        pipeline_name = "AI Transition Mixer"
+        pipeline_description = "Split side-by-side Resolume decks and crossfade through AI via VACE"
+        pipeline_version = "0.2.0"
+        estimated_vram_gb = 0.5
+        supports_vace = True
+        modified = True
+
+        # Declare inputs/outputs
+        inputs = ["video", "vace_input_frames"]
+        outputs = ["video"]
+
+        # Mode support — video mode uses lower resolution for speed
+        modes = {
+            "video": ModeDefaults(default=True),
+            "text": ModeDefaults(),
+        }
 
         # ── Performance Controls ────────────────────────────────────
 
@@ -90,38 +95,36 @@ if _HAS_SCOPE:
             default=0.0,
             ge=0.0,
             le=1.0,
+            description="Blend between Deck A (0.0) and Deck B (1.0)",
             json_schema_extra=ui_field_config(
                 order=0,
                 label="Crossfader",
-                category="configuration",
             ),
         )
 
         split_mode: SplitMode = Field(
             default=SplitMode.SIDE_BY_SIDE,
+            description="How the two decks are arranged in the input frame",
             json_schema_extra=ui_field_config(
                 order=1,
                 label="Split Mode",
-                category="configuration",
             ),
         )
 
         swap_decks: bool = Field(
             default=False,
+            description="Swap Deck A and Deck B sides",
             json_schema_extra=ui_field_config(
                 order=2,
                 label="Swap A/B",
-                category="configuration",
             ),
         )
 
-        # How many VACE context frames to generate per call.
-        # More = smoother context for the AI, but heavier.
-        # Scope auto-resamples to match the pipeline's chunk size.
         context_frames: int = Field(
             default=8,
             ge=1,
             le=24,
+            description="Number of VACE context frames (more = smoother, heavier)",
             json_schema_extra=ui_field_config(
                 order=3,
                 label="Context Frames",
@@ -129,16 +132,14 @@ if _HAS_SCOPE:
             ),
         )
 
-        # VACE context scale — how strongly the AI follows the context.
-        # 0.0 = ignore context (pure generation), 1.0 = strict adherence.
         vace_context_scale: float = Field(
             default=0.8,
             ge=0.0,
             le=1.0,
+            description="How strongly the AI follows the VACE context (0=ignore, 1=strict)",
             json_schema_extra=ui_field_config(
                 order=4,
                 label="Context Strength",
-                category="configuration",
             ),
         )
 
@@ -146,37 +147,37 @@ if _HAS_SCOPE:
 
         prompt_a: str = Field(
             default="",
+            description="Text prompt for Deck A scene",
             json_schema_extra=ui_field_config(
                 order=10,
                 label="Deck A Prompt",
-                category="configuration",
             ),
         )
 
         prompt_b: str = Field(
             default="",
+            description="Text prompt for Deck B scene",
             json_schema_extra=ui_field_config(
                 order=11,
                 label="Deck B Prompt",
-                category="configuration",
             ),
         )
 
         transition_style: str = Field(
             default="smooth morphing transition",
+            description="Visual style for the AI transition between decks",
             json_schema_extra=ui_field_config(
                 order=12,
                 label="Transition Style",
-                category="configuration",
             ),
         )
 
         auto_prompt: bool = Field(
             default=True,
+            description="Auto-generate sequential prompt arrays from deck prompts",
             json_schema_extra=ui_field_config(
                 order=13,
                 label="Auto Prompt",
-                category="configuration",
             ),
         )
 
