@@ -52,57 +52,73 @@ def _frame_to_base64(frame: np.ndarray, max_size: int = 512) -> str:
     return base64.b64encode(buf.getvalue()).decode("utf-8")
 
 
-def generate_transition_prompt(
+TRANSITION_SYSTEM_PROMPT = """\
+You are a prompt engineer for Wan2.1, a real-time AI video generation model.
+
+You write sequential prompt arrays for smooth video transitions between two scenes. Each array has exactly 6 prompts — one per video chunk (~2 seconds each, ~12 seconds total).
+
+RULES:
+1. Output ONLY valid JSON: {"prompts": ["...", "...", "...", "...", "...", "..."]}
+2. Every prompt must restate ALL key visual details (characters, clothing, setting, lighting, camera) to prevent drift between chunks.
+3. Each subsequent prompt adds ONE incremental change that moves from Scene A toward Scene B.
+4. The transition style describes HOW the scenes merge (e.g. "dissolve through smoke", "morph through water", "glitch transition").
+5. Maintain consistent camera angle, aspect ratio, and style language across all 6 prompts.
+6. Keep each prompt between 40-120 words. Be vivid and specific.
+7. Do NOT include any explanation, commentary, or thinking. ONLY the JSON object.
+
+/no_think"""
+
+
+def generate_transition_prompts(
     prompt_a: str,
     prompt_b: str,
     crossfader: float,
     transition_style: str = "smooth morphing",
+    num_prompts: int = 6,
     model: str = "qwen3.5-9b",
     lmstudio_url: str = "http://localhost:1234",
-) -> str:
+) -> list[str]:
     """
-    Use a local LLM (LM Studio / OpenAI-compatible API) to generate
-    a creative transition prompt blending two scene descriptions.
+    Generate a sequential prompt array for a Wan2.1 video transition.
 
-    NOT a vision model — takes text descriptions of each deck and
-    generates a creative prompt for the AI video generator.
+    Returns a list of prompts, one per chunk, that smoothly transitions
+    from Scene A to Scene B using the specified transition style.
+    The crossfader position determines WHERE in the transition we are,
+    so the prompts are biased accordingly.
     """
     import urllib.request
+    import re
 
-    # Build the request based on crossfader position
+    # At the extremes, just repeat the source prompt
     if crossfader <= 0.05:
-        return prompt_a
+        return [prompt_a] * num_prompts
     if crossfader >= 0.95:
-        return prompt_b
+        return [prompt_b] * num_prompts
 
     pct_b = int(crossfader * 100)
     pct_a = 100 - pct_b
 
+    user_msg = (
+        f"Generate a {num_prompts}-prompt transition array.\n\n"
+        f"SCENE A (starting point):\n{prompt_a}\n\n"
+        f"SCENE B (ending point):\n{prompt_b}\n\n"
+        f"Transition style: {transition_style}\n"
+        f"Current blend: {pct_a}% Scene A, {pct_b}% Scene B\n\n"
+        f"The transition should be weighted toward the current blend point. "
+        f"If blend is 70% A / 30% B, the first 4 prompts should be mostly A "
+        f"with B elements gradually appearing, and only the last 2 should show "
+        f"significant B presence.\n\n"
+        f'Output ONLY: {{"prompts": ["...", "...", "...", "...", "...", "..."]}}'
+    )
+
     payload = {
         "model": model,
         "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "You write short visual prompts for an AI video generator. "
-                    "Output ONLY the prompt, 10-20 words max. No thinking, no explanation. "
-                    "Vivid, descriptive phrases about colors, motion, mood, and style. "
-                    "/no_think"
-                ),
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"Blend these two scenes into one visual prompt.\n"
-                    f"Scene A ({pct_a}%): {prompt_a}\n"
-                    f"Scene B ({pct_b}%): {prompt_b}\n"
-                    f"Transition style: {transition_style}\n"
-                    f"Write the blended prompt:"
-                ),
-            },
+            {"role": "system", "content": TRANSITION_SYSTEM_PROMPT},
+            {"role": "user", "content": user_msg},
         ],
-        "max_tokens": 60,
-        "temperature": 0.4,
+        "max_tokens": 2000,
+        "temperature": 0.5,
         "stream": False,
     }
 
@@ -114,17 +130,35 @@ def generate_transition_prompt(
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=30) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             content = data["choices"][0]["message"]["content"].strip()
-            # Strip any <think>...</think> tags if model still thinks
+
+            # Strip <think> tags
             if "<think>" in content:
-                import re
                 content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
-            return content
+
+            # Extract JSON from response (handle markdown code blocks)
+            if "```" in content:
+                content = re.sub(r"```json?\s*", "", content)
+                content = re.sub(r"```", "", content)
+                content = content.strip()
+
+            parsed = json.loads(content)
+            prompts = parsed.get("prompts", [])
+
+            if isinstance(prompts, list) and len(prompts) >= 2:
+                return prompts[:num_prompts]
+            else:
+                logger.warning(f"[Prompter] Got {len(prompts)} prompts, expected {num_prompts}")
+                return [prompt_a] * num_prompts
+
+    except json.JSONDecodeError as e:
+        logger.warning(f"[Prompter] Failed to parse JSON: {e}\nContent: {content[:200]}")
+        return [prompt_a] * num_prompts
     except Exception as e:
-        logger.warning(f"LM Studio request failed: {e}")
-        return ""
+        logger.warning(f"[Prompter] LM Studio request failed: {e}")
+        return [prompt_a] * num_prompts
 
 
 # ─── Scope API Client ──────────────────────────────────────────────────────
@@ -230,7 +264,8 @@ class TransitionPrompter:
         self.prompt_b: str = ""
         self.crossfader: float = 0.0  # Polled from Scope or set externally
 
-        self._last_generated = ""
+        self._last_generated: list[str] = []
+        self.num_prompts: int = 6
 
     def start(self):
         """Start the background prompter loop."""
@@ -273,21 +308,22 @@ class TransitionPrompter:
 
                 # Only regenerate if both prompts are set and fader is in the blend zone
                 if self.prompt_a and self.prompt_b and 0.05 < self.crossfader < 0.95:
-                    generated = generate_transition_prompt(
+                    prompts = generate_transition_prompts(
                         self.prompt_a,
                         self.prompt_b,
                         self.crossfader,
                         self.transition_style,
+                        self.num_prompts,
                         self.model,
                         self.lmstudio_url,
                     )
 
-                    if generated and generated != self._last_generated:
-                        self._last_generated = generated
-                        logger.info(f"[TransitionPrompter] {generated}")
-                        update_scope_params(self.scope_url, prompt_a=None, prompt_b=None)
-                        # Push the blended prompt as the main prompt
-                        _push_prompt(self.scope_url, generated)
+                    if prompts and prompts != self._last_generated:
+                        self._last_generated = prompts
+                        for i, p in enumerate(prompts):
+                            logger.info(f"[TransitionPrompter] [{i+1}/{len(prompts)}] {p[:80]}...")
+                        # Push the prompt array to Scope
+                        _push_prompts(self.scope_url, prompts)
 
             except Exception as e:
                 logger.error(f"[TransitionPrompter] Error: {e}")
@@ -295,10 +331,10 @@ class TransitionPrompter:
             time.sleep(self.interval)
 
 
-def _push_prompt(scope_url: str, prompt: str) -> bool:
-    """Push a generated prompt to Scope's pipeline."""
+def _push_prompts(scope_url: str, prompts: list[str]) -> bool:
+    """Push a prompt array to Scope's pipeline (one prompt per chunk)."""
     import urllib.request
-    payload = json.dumps({"prompts": prompt}).encode("utf-8")
+    payload = json.dumps({"prompts": prompts}).encode("utf-8")
     req = urllib.request.Request(
         f"{scope_url}/api/v1/pipeline/update",
         data=payload,
@@ -309,7 +345,7 @@ def _push_prompt(scope_url: str, prompt: str) -> bool:
         with urllib.request.urlopen(req, timeout=5) as resp:
             return resp.status == 200
     except Exception as e:
-        logger.warning(f"Failed to push prompt: {e}")
+        logger.warning(f"Failed to push prompts: {e}")
         return False
 
 

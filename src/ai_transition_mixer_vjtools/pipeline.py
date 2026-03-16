@@ -353,26 +353,45 @@ class AiTransitionMixerPreprocessor(Pipeline):
                 f"deck_sizes=({deck_a.shape}, {deck_b.shape})"
             )
 
-        # ── Build prompt ───────────────────────────────────────────────
-        # Auto-prompt blends Deck A and B descriptions with transition style
-        generated_prompt = None
+        # ── Build prompt array ─────────────────────────────────────────
+        # Generate a 6-prompt sequential array for Wan2.1 chunk prompts.
+        # This is the fallback when the external VLM prompter isn't running.
+        # The external prompter generates much better prompts via Qwen 3.5.
+        generated_prompts = None
         if auto_prompt and (prompt_a or prompt_b):
             if crossfader <= 0.05 and prompt_a:
-                generated_prompt = prompt_a
+                generated_prompts = [prompt_a]
             elif crossfader >= 0.95 and prompt_b:
-                generated_prompt = prompt_b
+                generated_prompts = [prompt_b]
             elif prompt_a and prompt_b:
-                # Blend: weight the descriptions by crossfader position
-                if crossfader < 0.3:
-                    generated_prompt = f"{prompt_a}, {transition_style}, hints of {prompt_b}"
-                elif crossfader > 0.7:
-                    generated_prompt = f"{prompt_b}, {transition_style}, hints of {prompt_a}"
-                else:
-                    generated_prompt = f"{transition_style} between {prompt_a} and {prompt_b}"
+                # Simple 6-step interpolation as fallback
+                # (the external VLM prompter does this much better)
+                steps = 6
+                generated_prompts = []
+                for i in range(steps):
+                    t = i / (steps - 1)  # 0.0 to 1.0
+                    # Bias by crossfader position
+                    effective_t = crossfader * t + (1 - crossfader) * (t * 0.3)
+                    if effective_t < 0.2:
+                        generated_prompts.append(prompt_a)
+                    elif effective_t > 0.8:
+                        generated_prompts.append(prompt_b)
+                    elif effective_t < 0.4:
+                        generated_prompts.append(
+                            f"{prompt_a}. {transition_style}, with subtle hints of: {prompt_b}"
+                        )
+                    elif effective_t > 0.6:
+                        generated_prompts.append(
+                            f"{prompt_b}. {transition_style}, with lingering traces of: {prompt_a}"
+                        )
+                    else:
+                        generated_prompts.append(
+                            f"{transition_style} between {prompt_a} and {prompt_b}"
+                        )
             elif prompt_a:
-                generated_prompt = prompt_a
+                generated_prompts = [prompt_a]
             elif prompt_b:
-                generated_prompt = prompt_b
+                generated_prompts = [prompt_b]
 
         # ── Return VACE context + video + params ────────────────────
         # Pass vace_input_frames as a LIST so Scope's PreprocessVideoBlock
@@ -385,7 +404,7 @@ class AiTransitionMixerPreprocessor(Pipeline):
             "vace_context_scale": ctx_scale,
         }
 
-        if generated_prompt:
-            result["prompts"] = generated_prompt
+        if generated_prompts:
+            result["prompts"] = generated_prompts
 
         return result
