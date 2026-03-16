@@ -1,6 +1,6 @@
 [project]
 name = "ai-transition-mixer"
-version = "0.1.1"
+version = "0.2.0"
 description = "AI Transition Mixer — split side-by-side Resolume decks and crossfade through AI"
 requires-python = ">=3.10"
 dependencies = [
@@ -8,12 +8,12 @@ dependencies = [
     "torch",
 ]
 
-[project.entry-points."scope.plugins"]
+[project.entry-points."scope"]
 ai_transition_mixer = "ai_transition_mixer_vjtools.plugin"
 
 [build-system]
-requires = ["setuptools>=68.0"]
-build-backend = "setuptools.backends._legacy:_Backend"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
-[tool.setuptools.packages.find]
-where = ["src"]
+[tool.hatch.build.targets.wheel]
+packages = ["src/ai_transition_mixer_vjtools"]
