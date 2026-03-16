@@ -52,51 +52,78 @@ def _frame_to_base64(frame: np.ndarray, max_size: int = 512) -> str:
     return base64.b64encode(buf.getvalue()).decode("utf-8")
 
 
-def describe_frame(
-    frame: np.ndarray,
-    model: str = "qwen2.5-vl:3b",
-    ollama_url: str = "http://localhost:11434",
-    system_prompt: str = (
-        "You are a VJ visual describer. Describe this video frame in 8-15 words "
-        "for an AI video generator. Focus on colors, movement, mood, and key subjects. "
-        "Be vivid and concise. No sentences, just descriptive phrases."
-    ),
+def generate_transition_prompt(
+    prompt_a: str,
+    prompt_b: str,
+    crossfader: float,
+    transition_style: str = "smooth morphing",
+    model: str = "qwen3.5-9b",
+    lmstudio_url: str = "http://localhost:1234",
 ) -> str:
-    """Send a frame to Ollama VLM and get a scene description."""
+    """
+    Use a local LLM (LM Studio / OpenAI-compatible API) to generate
+    a creative transition prompt blending two scene descriptions.
+
+    NOT a vision model — takes text descriptions of each deck and
+    generates a creative prompt for the AI video generator.
+    """
     import urllib.request
 
-    b64 = _frame_to_base64(frame)
+    # Build the request based on crossfader position
+    if crossfader <= 0.05:
+        return prompt_a
+    if crossfader >= 0.95:
+        return prompt_b
+
+    pct_b = int(crossfader * 100)
+    pct_a = 100 - pct_b
 
     payload = {
         "model": model,
         "messages": [
-            {"role": "system", "content": system_prompt},
+            {
+                "role": "system",
+                "content": (
+                    "You write short visual prompts for an AI video generator. "
+                    "Output ONLY the prompt, 10-20 words max. No thinking, no explanation. "
+                    "Vivid, descriptive phrases about colors, motion, mood, and style. "
+                    "/no_think"
+                ),
+            },
             {
                 "role": "user",
-                "content": "Describe this scene:",
-                "images": [b64],
+                "content": (
+                    f"Blend these two scenes into one visual prompt.\n"
+                    f"Scene A ({pct_a}%): {prompt_a}\n"
+                    f"Scene B ({pct_b}%): {prompt_b}\n"
+                    f"Transition style: {transition_style}\n"
+                    f"Write the blended prompt:"
+                ),
             },
         ],
+        "max_tokens": 60,
+        "temperature": 0.4,
         "stream": False,
-        "options": {
-            "temperature": 0.3,
-            "num_predict": 50,
-        },
     }
 
     req = urllib.request.Request(
-        f"{ollama_url}/api/chat",
+        f"{lmstudio_url}/v1/chat/completions",
         data=json.dumps(payload).encode("utf-8"),
         headers={"Content-Type": "application/json"},
         method="POST",
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-            return data.get("message", {}).get("content", "").strip()
+            content = data["choices"][0]["message"]["content"].strip()
+            # Strip any <think>...</think> tags if model still thinks
+            if "<think>" in content:
+                import re
+                content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+            return content
     except Exception as e:
-        logger.warning(f"Ollama request failed: {e}")
+        logger.warning(f"LM Studio request failed: {e}")
         return ""
 
 
@@ -172,36 +199,38 @@ def split_frame(
 
 # ─── Main Loop ──────────────────────────────────────────────────────────────
 
-class VlmPrompter:
-    """Periodically describes each deck and pushes prompts to Scope."""
+class TransitionPrompter:
+    """
+    Periodically generates creative transition prompts by blending
+    deck descriptions via a local LLM (LM Studio).
+
+    Deck descriptions are set manually or by an external VLM.
+    This class handles the creative blending and pushes to Scope.
+    """
 
     def __init__(
         self,
         scope_url: str = "http://localhost:8000",
-        ollama_url: str = "http://localhost:11434",
-        model: str = "qwen2.5-vl:3b",
-        interval: float = 3.0,
-        split: str = "side_by_side",
-        spout_source: str = "",
+        lmstudio_url: str = "http://localhost:1234",
+        model: str = "qwen3.5-9b",
+        interval: float = 2.0,
+        transition_style: str = "smooth morphing",
     ):
         self.scope_url = scope_url
-        self.ollama_url = ollama_url
+        self.lmstudio_url = lmstudio_url
         self.model = model
         self.interval = interval
-        self.split = split
-        self.spout_source = spout_source
+        self.transition_style = transition_style
 
         self._running = False
         self._thread: Optional[threading.Thread] = None
-        self._current_prompt_a = ""
-        self._current_prompt_b = ""
 
-        # If Spout isn't available, accept frames pushed externally
-        self._external_frame: Optional[np.ndarray] = None
+        # Set these manually or via external VLM
+        self.prompt_a: str = ""
+        self.prompt_b: str = ""
+        self.crossfader: float = 0.0  # Polled from Scope or set externally
 
-    def push_frame(self, frame: np.ndarray):
-        """Push a frame externally (for testing or non-Spout setups)."""
-        self._external_frame = frame.copy()
+        self._last_generated = ""
 
     def start(self):
         """Start the background prompter loop."""
@@ -209,7 +238,7 @@ class VlmPrompter:
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
         logger.info(
-            f"[VlmPrompter] Started (model={self.model}, "
+            f"[TransitionPrompter] Started (model={self.model}, "
             f"interval={self.interval}s, scope={self.scope_url})"
         )
 
@@ -218,74 +247,106 @@ class VlmPrompter:
         if self._thread:
             self._thread.join(timeout=5)
 
-    def _get_frame(self) -> Optional[np.ndarray]:
-        """Get the latest composite frame."""
-        # Try Spout first
-        frame = capture_spout_frame(self.spout_source)
-        if frame is not None:
-            return frame
-        # Fall back to externally pushed frame
-        return self._external_frame
+    def _poll_crossfader(self):
+        """Try to read the current crossfader value from Scope."""
+        import urllib.request
+        try:
+            req = urllib.request.Request(
+                f"{self.scope_url}/api/v1/pipeline/parameters",
+                method="GET",
+            )
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                if "crossfader" in data:
+                    self.crossfader = float(data["crossfader"])
+        except Exception:
+            pass  # Use last known value
 
     def _loop(self):
         while self._running:
             try:
-                frame = self._get_frame()
-                if frame is not None:
-                    deck_a, deck_b = split_frame(frame, self.split)
+                if not self.prompt_a and not self.prompt_b:
+                    time.sleep(self.interval)
+                    continue
 
-                    # Describe both decks (sequentially — could parallelize)
-                    desc_a = describe_frame(deck_a, self.model, self.ollama_url)
-                    desc_b = describe_frame(deck_b, self.model, self.ollama_url)
+                self._poll_crossfader()
 
-                    if desc_a and desc_a != self._current_prompt_a:
-                        self._current_prompt_a = desc_a
-                        logger.info(f"[VlmPrompter] Deck A: {desc_a}")
-
-                    if desc_b and desc_b != self._current_prompt_b:
-                        self._current_prompt_b = desc_b
-                        logger.info(f"[VlmPrompter] Deck B: {desc_b}")
-
-                    update_scope_params(
-                        self.scope_url,
-                        prompt_a=self._current_prompt_a,
-                        prompt_b=self._current_prompt_b,
+                # Only regenerate if both prompts are set and fader is in the blend zone
+                if self.prompt_a and self.prompt_b and 0.05 < self.crossfader < 0.95:
+                    generated = generate_transition_prompt(
+                        self.prompt_a,
+                        self.prompt_b,
+                        self.crossfader,
+                        self.transition_style,
+                        self.model,
+                        self.lmstudio_url,
                     )
 
+                    if generated and generated != self._last_generated:
+                        self._last_generated = generated
+                        logger.info(f"[TransitionPrompter] {generated}")
+                        update_scope_params(self.scope_url, prompt_a=None, prompt_b=None)
+                        # Push the blended prompt as the main prompt
+                        _push_prompt(self.scope_url, generated)
+
             except Exception as e:
-                logger.error(f"[VlmPrompter] Error: {e}")
+                logger.error(f"[TransitionPrompter] Error: {e}")
 
             time.sleep(self.interval)
+
+
+def _push_prompt(scope_url: str, prompt: str) -> bool:
+    """Push a generated prompt to Scope's pipeline."""
+    import urllib.request
+    payload = json.dumps({"prompts": prompt}).encode("utf-8")
+    req = urllib.request.Request(
+        f"{scope_url}/api/v1/pipeline/update",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="PATCH",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.status == 200
+    except Exception as e:
+        logger.warning(f"Failed to push prompt: {e}")
+        return False
 
 
 # ─── CLI ────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="VLM Auto-Prompter for AI Transition Mixer")
+    parser = argparse.ArgumentParser(description="Transition Prompter for AI Transition Mixer")
     parser.add_argument("--scope-url", default="http://localhost:8000", help="Scope API URL")
-    parser.add_argument("--ollama-url", default="http://localhost:11434", help="Ollama API URL")
-    parser.add_argument("--model", default="qwen2.5-vl:3b", help="Ollama VLM model name")
-    parser.add_argument("--interval", type=float, default=3.0, help="Seconds between VLM calls")
-    parser.add_argument("--split", choices=["side_by_side", "top_bottom"], default="side_by_side")
-    parser.add_argument("--spout-source", default="", help="Spout source name (empty = any)")
+    parser.add_argument("--lmstudio-url", default="http://localhost:1234", help="LM Studio API URL")
+    parser.add_argument("--model", default="qwen3.5-9b", help="LM Studio model name")
+    parser.add_argument("--interval", type=float, default=2.0, help="Seconds between LLM calls")
+    parser.add_argument("--style", default="smooth morphing", help="Transition style description")
+    parser.add_argument("--prompt-a", required=True, help="Description of Deck A content")
+    parser.add_argument("--prompt-b", required=True, help="Description of Deck B content")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 
-    prompter = VlmPrompter(
+    prompter = TransitionPrompter(
         scope_url=args.scope_url,
-        ollama_url=args.ollama_url,
+        lmstudio_url=args.lmstudio_url,
         model=args.model,
         interval=args.interval,
-        split=args.split,
-        spout_source=args.spout_source,
+        transition_style=args.style,
     )
+    prompter.prompt_a = args.prompt_a
+    prompter.prompt_b = args.prompt_b
     prompter.start()
 
-    print(f"VLM Prompter running (Ctrl+C to stop)")
+    print(f"Transition Prompter running (Ctrl+C to stop)")
     print(f"  Model:    {args.model}")
     print(f"  Interval: {args.interval}s")
     print(f"  Scope:    {args.scope_url}")
+    print(f"  Deck A:   {args.prompt_a}")
+    print(f"  Deck B:   {args.prompt_b}")
+    print(f"  Style:    {args.style}")
+    print(f"\nPolling crossfader from Scope and generating blended prompts...")
 
     try:
         while True:
