@@ -142,6 +142,44 @@ if _HAS_SCOPE:
             ),
         )
 
+        # ── Prompt Controls ─────────────────────────────────────────
+
+        prompt_a: str = Field(
+            default="",
+            json_schema_extra=ui_field_config(
+                order=10,
+                label="Deck A Prompt",
+                category="configuration",
+            ),
+        )
+
+        prompt_b: str = Field(
+            default="",
+            json_schema_extra=ui_field_config(
+                order=11,
+                label="Deck B Prompt",
+                category="configuration",
+            ),
+        )
+
+        transition_style: str = Field(
+            default="smooth morphing transition",
+            json_schema_extra=ui_field_config(
+                order=12,
+                label="Transition Style",
+                category="configuration",
+            ),
+        )
+
+        auto_prompt: bool = Field(
+            default=True,
+            json_schema_extra=ui_field_config(
+                order=13,
+                label="Auto Prompt",
+                category="configuration",
+            ),
+        )
+
 else:
 
     class AiTransitionMixerConfig:
@@ -150,6 +188,10 @@ else:
             self.pipeline_id = kwargs.get("pipeline_id", "ai_transition_mixer__vj_tools")
             self.crossfader = kwargs.get("crossfader", 0.0)
             self.split_mode = kwargs.get("split_mode", "side_by_side")
+            self.prompt_a = kwargs.get("prompt_a", "")
+            self.prompt_b = kwargs.get("prompt_b", "")
+            self.transition_style = kwargs.get("transition_style", "smooth morphing transition")
+            self.auto_prompt = kwargs.get("auto_prompt", True)
             self.swap_decks = kwargs.get("swap_decks", False)
             self.context_frames = kwargs.get("context_frames", 8)
             self.vace_context_scale = kwargs.get("vace_context_scale", 0.8)
@@ -208,6 +250,11 @@ class AiTransitionMixerPreprocessor(Pipeline):
         swap = bool(kwargs.get("swap_decks", getattr(self.config, "swap_decks", False)))
         num_ctx = int(kwargs.get("context_frames", getattr(self.config, "context_frames", 8)))
         ctx_scale = float(kwargs.get("vace_context_scale", getattr(self.config, "vace_context_scale", 0.8)))
+
+        prompt_a = str(kwargs.get("prompt_a", getattr(self.config, "prompt_a", "")))
+        prompt_b = str(kwargs.get("prompt_b", getattr(self.config, "prompt_b", "")))
+        transition_style = str(kwargs.get("transition_style", getattr(self.config, "transition_style", "smooth morphing transition")))
+        auto_prompt = bool(kwargs.get("auto_prompt", getattr(self.config, "auto_prompt", True)))
 
         # ── Decode input tensor ─────────────────────────────────────
         if isinstance(video, list):
@@ -306,6 +353,27 @@ class AiTransitionMixerPreprocessor(Pipeline):
                 f"deck_sizes=({deck_a.shape}, {deck_b.shape})"
             )
 
+        # ── Build prompt ───────────────────────────────────────────────
+        # Auto-prompt blends Deck A and B descriptions with transition style
+        generated_prompt = None
+        if auto_prompt and (prompt_a or prompt_b):
+            if crossfader <= 0.05 and prompt_a:
+                generated_prompt = prompt_a
+            elif crossfader >= 0.95 and prompt_b:
+                generated_prompt = prompt_b
+            elif prompt_a and prompt_b:
+                # Blend: weight the descriptions by crossfader position
+                if crossfader < 0.3:
+                    generated_prompt = f"{prompt_a}, {transition_style}, hints of {prompt_b}"
+                elif crossfader > 0.7:
+                    generated_prompt = f"{prompt_b}, {transition_style}, hints of {prompt_a}"
+                else:
+                    generated_prompt = f"{transition_style} between {prompt_a} and {prompt_b}"
+            elif prompt_a:
+                generated_prompt = prompt_a
+            elif prompt_b:
+                generated_prompt = prompt_b
+
         # ── Return VACE context + video + params ────────────────────
         # Pass vace_input_frames as a LIST so Scope's PreprocessVideoBlock
         # auto-resizes and resamples to the correct chunk frame count.
@@ -316,5 +384,8 @@ class AiTransitionMixerPreprocessor(Pipeline):
             "vace_enabled": True,
             "vace_context_scale": ctx_scale,
         }
+
+        if generated_prompt:
+            result["prompts"] = generated_prompt
 
         return result
