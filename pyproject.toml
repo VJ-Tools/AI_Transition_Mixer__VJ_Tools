@@ -1,7 +1,7 @@
 [project]
 name = "ai-transition-mixer"
-version = "0.2.0"
-description = "AI Transition Mixer — split side-by-side Resolume decks and crossfade through AI"
+version = "0.3.0"
+description = "AI Transition Mixer — dual-input crossfader graph node for Scope with VACE output"
 requires-python = ">=3.10"
 dependencies = [
     "numpy",

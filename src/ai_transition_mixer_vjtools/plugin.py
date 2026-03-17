@@ -9,10 +9,10 @@ except ImportError:
         def hookimpl(func):
             return func
 
-from .pipeline import AiTransitionMixerPreprocessor
+from .pipeline import AiTransitionMixerPipeline
 
 
 @hookimpl
 def register_pipelines(register):
-    """Register the AI Transition Mixer preprocessor with Scope."""
-    register(AiTransitionMixerPreprocessor)
+    """Register the AI Transition Mixer graph node with Scope."""
+    register(AiTransitionMixerPipeline)
