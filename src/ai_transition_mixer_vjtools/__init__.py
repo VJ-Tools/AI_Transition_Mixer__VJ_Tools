@@ -1,4 +1,4 @@
-"""AI Transition Mixer — Scope preprocessor for AI-powered deck transitions."""
-from .pipeline import AiTransitionMixerPreprocessor
+"""AI Transition Mixer — Scope graph preprocessor node for AI-powered deck transitions."""
+from .pipeline import AiTransitionMixerPipeline
 
-__all__ = ["AiTransitionMixerPreprocessor"]
+__all__ = ["AiTransitionMixerPipeline"]
